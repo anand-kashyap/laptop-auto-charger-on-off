@@ -46,7 +46,7 @@ pip install psutil python-dotenv plugp100 aiohttp
 
 ## Configuration
 
-Create a `sample.env` or `.env` file with the following variables:
+Create a `.env` based on given `sample.env` file with the following variables:
 
 ### Battery Thresholds
 - `LOW_THRESHOLD` (default: 35) - Battery % to turn charger ON in night mode
