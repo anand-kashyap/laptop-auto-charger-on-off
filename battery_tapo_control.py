@@ -68,11 +68,34 @@ def get_battery_percent():
     battery = psutil.sensors_battery()
     return battery.percent if battery else None
 
-def is_night_window():
+def is_schedule_window():
     now = datetime.now().time()
     if START_TIME <= END_TIME:
         return START_TIME <= now <= END_TIME
     return now >= START_TIME or now <= END_TIME
+
+
+def should_charge(mode, percent, plug_on, is_schedule_window):
+    if mode == "always_on":
+        return True
+
+    if mode == "auto":
+        if percent > HIGH_THRESHOLD:
+            return False
+        if percent < LOW_THRESHOLD:
+            return True
+        return plug_on
+
+    if mode == "schedule":
+        if not is_schedule_window:
+            return True
+        if percent > HIGH_THRESHOLD:
+            return False
+        if percent < LOW_THRESHOLD:
+            return True
+        return plug_on
+
+    raise ValueError(f"Unsupported charging mode: {mode}")
 
 async def send_ntfy(session: ClientSession, message: str, priority: int = 3):
     try:
@@ -156,33 +179,19 @@ async def monitor_battery(session: ClientSession):
 
             plug_on = onoff.device_on
 
-            # Determine actual charging intent based on CLI argument
-            should_charge = True
-            if CHARGE_MODE == "always_on":
-                should_charge = True
-            elif CHARGE_MODE == "auto":
-                if percent > HIGH_THRESHOLD:
-                    should_charge = False
-                elif percent < LOW_THRESHOLD:
-                    should_charge = True
-                else:
-                    should_charge = plug_on  # Hold current state inside deadband zone
-            elif CHARGE_MODE == "schedule":
-                if is_night_window():
-                    if percent > HIGH_THRESHOLD:
-                        should_charge = False
-                    elif percent < LOW_THRESHOLD:
-                        should_charge = True
-                    else:
-                        should_charge = plug_on
-                else:
-                    should_charge = True
+            schedule_window_active = CHARGE_MODE == "schedule" and is_schedule_window()
+            should_enable_charging = should_charge(
+                CHARGE_MODE,
+                percent,
+                plug_on,
+                schedule_window_active,
+            )
 
             log(f"Battery: {percent}% | Plug is {'ON' if plug_on else 'OFF'} | Mode: {CHARGE_MODE}")
 
-            if should_charge and not plug_on:
+            if should_enable_charging and not plug_on:
                 await onoff.turn_on()
-            elif not should_charge and plug_on:
+            elif not should_enable_charging and plug_on:
                 await onoff.turn_off()
 
             await asyncio.sleep(CHECK_INTERVAL)
