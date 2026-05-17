@@ -7,7 +7,7 @@ Automatic battery monitoring and charging control system that intelligently mana
 This script monitors your device's battery percentage and automatically controls a Tapo smart plug to manage charging. It includes:
 
 - **Automatic charging control** based on battery thresholds
-- **Night mode** with scheduled charging windows
+- **Legacy schedule mode** retained for testing
 - **Notifications** via ntfy.sh when critical events occur
 - **Connection monitoring** with alerts for power outages or plug unavailability
 - **Rotating log file** management with configurable file size limits
@@ -15,8 +15,8 @@ This script monitors your device's battery percentage and automatically controls
 ## Features
 
 - **Smart Charging Modes**:
-  - **Always Charging Mode** (day hours): Charger always remains ON
-  - **Auto Charge Mode** (night hours): Charger turns OFF when battery reaches HIGH_THRESHOLD and ON when it drops below LOW_THRESHOLD
+  - **Always Charging Mode**: Charger always remains ON
+  - **Auto Charge Mode**: Charger turns OFF when battery reaches HIGH_THRESHOLD and ON when it drops below LOW_THRESHOLD
 
 - **Critical Monitoring**: Detects when battery is critically low and Tapo plug is unreachable (potential power outage)
 
@@ -29,7 +29,7 @@ This script monitors your device's battery percentage and automatically controls
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.14+
 - `psutil` - Battery monitoring
 - `python-dotenv` - Environment variable loading
 - `plugp100` - Tapo device control
@@ -76,25 +76,31 @@ Create a `.env` based on given `sample.env` file with the following variables:
 
 ## Usage
 
-Run the script:
+Run the script in explicit mode:
 ```bash
-python battery_tapo_control.py
+python battery_tapo_control.py --mode always_on
+python battery_tapo_control.py --mode auto
+python battery_tapo_control.py --mode schedule
 ```
 
-To run in the background (Linux/Mac):
+Use helper to switch mode on Windows:
 ```bash
-nohup python battery_tapo_control.py > /dev/null 2>&1 &
+python battery_tapo_mode_switch.py --mode auto
+python battery_tapo_mode_switch.py --mode always_on
 ```
 
-To run as a service on Linux, create a systemd service file.
+Switching from `always_on` to `auto` or `schedule` waits 300 seconds before restart. Switching to `always_on` restarts immediately.
+Running `always_on` again during that wait cancels pending delayed switch before it can fire.
+Running same mode again is no-op, so `auto` -> `auto` and `always_on` -> `always_on` do not restart process.
 
 ## How It Works
 
 1. **Battery Monitoring**: Continuously checks battery percentage at regular intervals
 2. **Connection Management**: Automatically reconnects if Tapo plug becomes unavailable
 3. **Mode-Based Control**:
-   - Outside scheduled hours: Keeps charger ON
-   - During scheduled hours: Manages charging based on battery thresholds
+  - `always_on`: charger stays ON
+  - `auto`: charger uses low/high battery thresholds
+  - `schedule`: legacy time-window behavior kept for testing
 4. **Alert System**: Sends notifications for connection issues and critical battery states
 5. **Logging**: Records all actions and status changes for troubleshooting
 
