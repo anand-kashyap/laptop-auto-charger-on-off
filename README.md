@@ -18,7 +18,7 @@ This script monitors your device's battery percentage and automatically controls
   - **Always Charging Mode**: Charger always remains ON
   - **Auto Charge Mode**: Charger turns OFF when battery reaches HIGH_THRESHOLD and ON when it drops below LOW_THRESHOLD; ignores schedule window completely
 
-- **Critical Monitoring**: Detects when battery is critically low and Tapo plug is unreachable (potential power outage)
+- **Critical Monitoring**: Sends ntfy alert when battery becomes critically low; adds power-outage context if Tapo plug is unreachable
 
 - **Notification System**: Sends push notifications for:
   - Connection restored
@@ -53,7 +53,7 @@ Create a `.env` based on given `sample.env` file with the following variables:
 - `HIGH_THRESHOLD` (default: 85) - Battery % to turn charger OFF in night mode
 - `CRITICAL_THRESHOLD` (default: 25) - Battery % considered critical for alerts
 
-Auto mode uses these thresholds all day; schedule mode uses them only inside its time window.
+Auto mode uses these thresholds all day; schedule mode uses them only inside its time window. Critical alerts fire in every mode.
 
 ### Tapo Smart Plug
 - `TAPO_IP` - IP address of your Tapo plug

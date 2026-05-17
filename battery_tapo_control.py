@@ -75,6 +75,10 @@ def is_schedule_window():
     return now >= START_TIME or now <= END_TIME
 
 
+def is_battery_critical(percent):
+    return percent < CRITICAL_THRESHOLD
+
+
 def should_charge(mode, percent, plug_on, is_schedule_window):
     if mode == "always_on":
         return True
@@ -99,14 +103,15 @@ def should_charge(mode, percent, plug_on, is_schedule_window):
 
 async def send_ntfy(session: ClientSession, message: str, priority: int = 3):
     try:
-        await session.post(
+        async with session.post(
             NTFY_TOPIC,
             data=message.encode("utf-8"),
             headers={
                 "Content-Type": "text/plain",
                 "Priority": str(priority),
             }
-        )
+        ) as response:
+            response.raise_for_status()
     except Exception as e:
         log(f"ntfy notification failed: {e}", "warning")
 
@@ -124,8 +129,8 @@ async def connect_plug():
 
 async def monitor_battery(session: ClientSession):
     device, onoff = None, None
-    first_state_read = True
     tapo_was_down = False
+    critical_notified = False
 
     try:
         while True:
@@ -134,6 +139,10 @@ async def monitor_battery(session: ClientSession):
                 log("Unable to read battery info.", "warning")
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
+
+            battery_is_critical = is_battery_critical(percent)
+            if not battery_is_critical:
+                critical_notified = False
 
             if not device or not onoff:
                 log("Connecting to Tapo plug...")
@@ -144,54 +153,62 @@ async def monitor_battery(session: ClientSession):
                     if tapo_was_down:
                         await send_ntfy(session, "✅ Power restored / Tapo plug reachable again.", priority=3)
                         tapo_was_down = False
-
-                    first_state_read = True
                 except Exception as e:
                     log(f"Tapo connect failed: {e}", "warning")
-                    if not tapo_was_down and (FORCE_NOTIFY_TEST or percent < CRITICAL_THRESHOLD):
+                    if not tapo_was_down and (FORCE_NOTIFY_TEST or battery_is_critical):
                         await send_ntfy(
                             session,
                             f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage.",
                             priority=5
                         )
                         tapo_was_down = True
+                        if battery_is_critical:
+                            critical_notified = True
                     device, onoff = None, None
                     await asyncio.sleep(CHECK_INTERVAL)  # Sleep on connection failure
                     continue
 
-            if not first_state_read:
-                try:
-                    await device.update()
-                except Exception as e:
-                    log(f"Tapo Plug unreachable: {e}", "warning")
-                    if not tapo_was_down and (FORCE_NOTIFY_TEST or percent < CRITICAL_THRESHOLD):
-                        await send_ntfy(
-                            session,
-                            f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage.",
-                            priority=5
-                        )
-                        tapo_was_down = True
-                    device, onoff = None, None
-                    await asyncio.sleep(CHECK_INTERVAL)  # Fixed tight loop bug here
-                    continue
-            else:
-                first_state_read = False
+            try:
+                await device.update()
+            except Exception as e:
+                log(f"Tapo Plug unreachable: {e}", "warning")
+                if not tapo_was_down and (FORCE_NOTIFY_TEST or battery_is_critical):
+                    await send_ntfy(
+                        session,
+                        f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage.",
+                        priority=5
+                    )
+                    tapo_was_down = True
+                    if battery_is_critical:
+                        critical_notified = True
+                device, onoff = None, None
+                await asyncio.sleep(CHECK_INTERVAL)  # Fixed tight loop bug here
+                continue
 
-            plug_on = onoff.device_on
+            assert device is not None
+            assert onoff is not None
+
+            if battery_is_critical and not critical_notified:
+                await send_ntfy(
+                    session,
+                    f"⚠️ Battery {percent}% is critical in {CHARGE_MODE} mode.",
+                    priority=5,
+                )
+                critical_notified = True
 
             schedule_window_active = CHARGE_MODE == "schedule" and is_schedule_window()
             should_enable_charging = should_charge(
                 CHARGE_MODE,
                 percent,
-                plug_on,
+                onoff.device_on,
                 schedule_window_active,
             )
 
-            log(f"Battery: {percent}% | Plug is {'ON' if plug_on else 'OFF'} | Mode: {CHARGE_MODE}")
+            log(f"Battery: {percent}% | Plug is {'ON' if onoff.device_on else 'OFF'} | Mode: {CHARGE_MODE}")
 
-            if should_enable_charging and not plug_on:
+            if should_enable_charging and not onoff.device_on:
                 await onoff.turn_on()
-            elif not should_enable_charging and plug_on:
+            elif not should_enable_charging and onoff.device_on:
                 await onoff.turn_off()
 
             await asyncio.sleep(CHECK_INTERVAL)
