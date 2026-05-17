@@ -33,20 +33,20 @@ The code should make that separation obvious in one place.
 
 ### Decision Function
 
-Extract one pure decision function for charger intent. The function should take mode, battery percent, and current plug state, then return whether charger should be on.
+Extract one pure decision function for charger intent. The caller computes schedule-window state once and passes it in, so the helper stays free of direct time lookup. The function should take mode, battery percent, current plug state, and schedule-window state, then return whether charger should be on.
 
 Recommended shape:
 
 ```python
-def should_charge(mode, percent, plug_on, is_night_window):
+def should_charge(mode, percent, plug_on, is_schedule_window):
     ...
 ```
 
 Behavior:
 
 - `always_on`: return `True`
-- `auto`: ignore `is_night_window`; use battery thresholds only
-- `schedule`: use `is_night_window` to decide whether to apply threshold control
+- `auto`: ignore `is_schedule_window`; use battery thresholds only
+- `schedule`: use `is_schedule_window` to decide whether to apply threshold control
 
 ### Mode Rules
 
@@ -65,6 +65,10 @@ Behavior:
 `always_on`:
 
 - Return `True` unconditionally
+
+### Schedule Window Computation
+
+`is_schedule_window` is computed in caller code only when `schedule` mode needs it. `auto` must not consult schedule-window logic at all, even as an intermediate branch.
 
 ### Integration Point
 
@@ -89,30 +93,9 @@ Keep existing error handling unchanged:
 
 Decision function should not raise for normal mode inputs. If mode is invalid, it should fail fast in a way that surfaces during startup or test execution.
 
-## Testing
-
-Add focused tests for the decision function. Suggested coverage:
-
-1. `always_on` returns `True` for any battery percent and plug state.
-2. `auto` turns OFF above `HIGH_THRESHOLD`.
-3. `auto` turns ON below `LOW_THRESHOLD`.
-4. `auto` holds current plug state in deadband.
-5. `auto` ignores schedule window input completely.
-6. `schedule` turns ON outside window.
-7. `schedule` applies thresholds inside window.
-8. `schedule` holds current plug state in deadband inside window.
-
-Use a small matrix-style unit test table rather than end-to-end hardware tests.
-
 ## Acceptance Criteria
 
 1. `auto` never depends on `START_TIME` or `END_TIME` for charger decisions.
 2. `schedule` behavior matches current legacy behavior.
 3. `always_on` still forces charger on.
 4. Refactor is isolated to charging decision logic.
-5. Tests cover all mode/threshold combinations above.
-
-## Open Questions
-
-1. Whether to keep the helper signature as `should_charge(mode, percent, plug_on, is_night_window)` or compute schedule window only in the caller is an implementation detail. The behavior stays the same either way.
-2. Whether to rename `is_night_window` to `is_schedule_window` is optional cleanup only.
