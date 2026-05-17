@@ -1,12 +1,10 @@
 import sys
+import argparse
 import asyncio
-if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 import psutil
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, time
+from datetime import datetime
 from dotenv import load_dotenv
 import os
 from plugp100.common.credentials import AuthCredential
@@ -15,6 +13,17 @@ from plugp100.new.components.on_off_component import OnOffComponent
 from aiohttp import ClientSession
 
 load_dotenv()
+
+# Parse CLI arguments
+parser = argparse.ArgumentParser(description="Battery Tapo Control Monitor")
+parser.add_argument(
+    "--mode",
+    choices=["schedule", "always_on", "auto"],
+    default="schedule",
+    help="Charging mode: schedule (time-based), always_on (always on), auto (threshold-based)"
+)
+args = parser.parse_args()
+CHARGE_MODE = args.mode
 
 # ---------------- CONFIG ----------------
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
@@ -40,9 +49,6 @@ START_TIME = datetime.strptime(START_TIME_STR, "%H:%M").time()
 END_TIME = datetime.strptime(END_TIME_STR, "%H:%M").time()
 # ----------------------------------------
 
-
-shutdown_event = asyncio.Event()
-
 logger = logging.getLogger("BatteryTapoMonitor")
 logger.setLevel(logging.INFO)
 
@@ -63,23 +69,21 @@ def get_battery_percent():
     return battery.percent if battery else None
 
 def is_night_window():
-    FORCE_NIGHT_MODE = False
-    if FORCE_NIGHT_MODE:
-        return True
     now = datetime.now().time()
+    if START_TIME <= END_TIME:
+        return START_TIME <= now <= END_TIME
     return now >= START_TIME or now <= END_TIME
 
-async def send_ntfy(message, priority=3):
+async def send_ntfy(session: ClientSession, message: str, priority: int = 3):
     try:
-        async with ClientSession() as session:
-            await session.post(
-                NTFY_TOPIC,
-                data=message.encode("utf-8"),
-                headers={
-                    "Content-Type": "text/plain",
-                    "Priority": str(priority),
-                }
-            )
+        await session.post(
+            NTFY_TOPIC,
+            data=message.encode("utf-8"),
+            headers={
+                "Content-Type": "text/plain",
+                "Priority": str(priority),
+            }
+        )
     except Exception as e:
         log(f"ntfy notification failed: {e}", "warning")
 
@@ -95,7 +99,7 @@ async def connect_plug():
     )
     return device, onoff
 
-async def monitor_battery():
+async def monitor_battery(session: ClientSession):
     device, onoff = None, None
     first_state_read = True
     tapo_was_down = False
@@ -115,58 +119,71 @@ async def monitor_battery():
                     log("Connected to Tapo plug")
 
                     if tapo_was_down:
-                        await send_ntfy(
-                            "✅ Power restored / Tapo plug reachable again.",
-                            priority=3
-                        )
+                        await send_ntfy(session, "✅ Power restored / Tapo plug reachable again.", priority=3)
                         tapo_was_down = False
 
                     first_state_read = True
-
                 except Exception as e:
                     log(f"Tapo connect failed: {e}", "warning")
-
                     if not tapo_was_down and (FORCE_NOTIFY_TEST or percent < CRITICAL_THRESHOLD):
                         await send_ntfy(
-                            f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage or switch off.",
+                            session,
+                            f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage.",
                             priority=5
                         )
                         tapo_was_down = True
-
                     device, onoff = None, None
-                    await asyncio.sleep(CHECK_INTERVAL)
+                    await asyncio.sleep(CHECK_INTERVAL)  # Sleep on connection failure
                     continue
 
             if not first_state_read:
                 try:
                     await device.update()
                 except Exception as e:
-                    log(f"Tapo Plug unreachable(poweroff maybe): {e}", "warning")
-
+                    log(f"Tapo Plug unreachable: {e}", "warning")
                     if not tapo_was_down and (FORCE_NOTIFY_TEST or percent < CRITICAL_THRESHOLD):
                         await send_ntfy(
-                            f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage or switch off.",
+                            session,
+                            f"⚠️ Battery {percent}% and Tapo plug unreachable. Possible power outage.",
                             priority=5
                         )
                         tapo_was_down = True
-
                     device, onoff = None, None
+                    await asyncio.sleep(CHECK_INTERVAL)  # Fixed tight loop bug here
                     continue
             else:
                 first_state_read = False
 
             plug_on = onoff.device_on
-            mode = "ALWAYS_CHARGING" if not is_night_window() else "AUTO_CHARGE"
-            log(f"Battery: {percent}% | Plug is {'ON' if plug_on else 'OFF'} | Mode: {mode}")
 
-            if not is_night_window():
-                if not plug_on:
-                    await onoff.turn_on()
-            else:
-                if percent > HIGH_THRESHOLD and plug_on:
-                    await onoff.turn_off()
-                elif percent < LOW_THRESHOLD and not plug_on:
-                    await onoff.turn_on()
+            # Determine actual charging intent based on CLI argument
+            should_charge = True
+            if CHARGE_MODE == "always_on":
+                should_charge = True
+            elif CHARGE_MODE == "auto":
+                if percent > HIGH_THRESHOLD:
+                    should_charge = False
+                elif percent < LOW_THRESHOLD:
+                    should_charge = True
+                else:
+                    should_charge = plug_on  # Hold current state inside deadband zone
+            elif CHARGE_MODE == "schedule":
+                if is_night_window():
+                    if percent > HIGH_THRESHOLD:
+                        should_charge = False
+                    elif percent < LOW_THRESHOLD:
+                        should_charge = True
+                    else:
+                        should_charge = plug_on
+                else:
+                    should_charge = True
+
+            log(f"Battery: {percent}% | Plug is {'ON' if plug_on else 'OFF'} | Mode: {CHARGE_MODE}")
+
+            if should_charge and not plug_on:
+                await onoff.turn_on()
+            elif not should_charge and plug_on:
+                await onoff.turn_off()
 
             await asyncio.sleep(CHECK_INTERVAL)
 
@@ -175,11 +192,14 @@ async def monitor_battery():
         raise
 
 async def main():
-    log("Battery monitor started...")
-    await monitor_battery()
+    log(f"Battery monitor started with mode: {CHARGE_MODE}...")
+    async with ClientSession() as session:
+        await monitor_battery(session)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        # Modern Python 3.14+ compatible runtime setup
+        loop_factory = asyncio.WindowsSelectorEventLoopPolicy().new_event_loop if sys.platform.startswith("win") else None
+        asyncio.run(main(), loop_factory=loop_factory)
     except KeyboardInterrupt:
         sys.exit(0)
